@@ -1,4 +1,4 @@
-name: RDP
+name: Phone RDP
 
 on:
   workflow_dispatch:
@@ -6,23 +6,26 @@ on:
 jobs:
   setup-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 120
 
     steps:
-      - name: Enable RDP and Firewall
+      - name: Enable RDP & Firewall
         run: |
+          # Enable Remote Desktop and disable NLA
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                            -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "UserAuthentication" -Value 0 -Force
+
+          # Allow RDP through firewall
           netsh advfirewall firewall delete rule name="GitHub-RDP" 2>$null
           netsh advfirewall firewall add rule name="GitHub-RDP" dir=in action=allow protocol=TCP localport=3389
+
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User (expires in 30 days)
         id: create_user
         run: |
-          # Generate random password (PowerShell Core compatible)
           $upper   = 65..90    | ForEach-Object {[char]$_}
           $lower   = 97..122   | ForEach-Object {[char]$_}
           $number  = 48..57    | ForEach-Object {[char]$_}
@@ -31,69 +34,24 @@ jobs:
           $password = -join ((1..16) | ForEach-Object { $allChars | Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Create or update local user 'RDP'
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
             Set-LocalUser -Name "RDP" -Password $securePass
           } else {
             New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires:$false
           }
 
-          # Add to Remote Desktop Users (no admin)
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
 
-          # Set expiry in 30 days
           $expireDate = (Get-Date).AddDays(30)
           net user RDP /expires:$($expireDate.ToString("MM/dd/yyyy"))
 
-          # Correctly append to GITHUB_ENV (use Add-Content to avoid UTF-16 output)
           Add-Content -Path $env:GITHUB_ENV -Value ("RDP_PASSWORD=" + $password)
           Add-Content -Path $env:GITHUB_ENV -Value ("RDP_EXPIRE=" + $expireDate.ToString("o"))
 
-          Write-Host "RDP user created. (Password exported to GITHUB_ENV)"
+          Write-Host "RDP User: RDP"
+          Write-Host "Password: $password"
+          Write-Host "Expires: $expireDate"
 
-      # --- Try to download & start LocalXpose (may fail if URL changes) ---
-      - name: Download LocalXpose (try latest release)
-        run: |
-          $ok = $false
-          $url = "https://github.com/localxpose/localxpose/releases/latest/download/loclx-windows-amd64.zip"
-          Write-Host "Attempting to download LocalXpose from: $url"
-          try {
-            Invoke-WebRequest -Uri $url -OutFile loclx.zip -ErrorAction Stop
-            Expand-Archive loclx.zip -DestinationPath loclx_extracted -Force
-            $exe = Get-ChildItem -Path loclx_extracted -Recurse -Filter "loclx*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($exe) {
-              Move-Item $exe.FullName .\loclx.exe -Force
-              $ok = $true
-            } elseif (Test-Path .\loclx.exe) {
-              $ok = $true
-            }
-          } catch {
-            Write-Warning "LocalXpose download failed: $($_.Exception.Message)"
-          }
-          if ($ok) {
-            Add-Content -Path $env:GITHUB_ENV -Value "LOCLX_AVAILABLE=true"
-            Write-Host "LocalXpose downloaded."
-          } else {
-            Add-Content -Path $env:GITHUB_ENV -Value "LOCLX_AVAILABLE=false"
-            Write-Host "LocalXpose not available; continuing."
-          }
-
-      - name: Start LocalXpose Tunnel (if available)
-        if: env.LOCLX_AVAILABLE == 'true'
-        run: |
-          Start-Process -NoNewWindow -FilePath "$PWD\loclx.exe" -ArgumentList "tcp --port 3389" -RedirectStandardOutput loclx.log
-          Start-Sleep -Seconds 12
-          $output = Get-Content loclx.log -Raw -ErrorAction SilentlyContinue
-          $addrLine = ($output -split "`n" | Select-String -Pattern "tcp://").ToString().Trim()
-          if ($addrLine) {
-            $addr = $addrLine.Trim()
-            Add-Content -Path $env:GITHUB_ENV -Value ("LOCLX_ADDR=" + $addr)
-            Write-Host "LocalXpose tunnel address: $addr"
-          } else {
-            Write-Warning "LocalXpose started but no address found in log."
-          }
-
-      # --- PageKite (always start) ---
       - name: Download PageKite
         run: |
           Invoke-WebRequest https://pagekite.net/pk/pagekite.py -OutFile pagekite.py -ErrorAction Stop
@@ -103,38 +61,19 @@ jobs:
           $random = Get-Random -Minimum 10000 -Maximum 99999
           $sub = "rdp-$random"
           Add-Content -Path $env:GITHUB_ENV -Value ("PAGEKITE_SUB=" + $sub)
+
+          # Start PageKite in background
           Start-Process -NoNewWindow -FilePath "python" -ArgumentList "pagekite.py 3389 $sub.pagekite.me" -RedirectStandardOutput pagekite.log
-          Start-Sleep -Seconds 10
-          Write-Host "PageKite started for host: $sub.pagekite.me"
+          Start-Sleep -Seconds 15
 
-      - name: Gather Connection Info + Write artifact
+          Write-Host "=== Connect from Phone ==="
+          Write-Host "Host: $sub.pagekite.me"
+          Write-Host "Port: 3389"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $env:RDP_PASSWORD"
+          Write-Host "==========================="
+
+      - name: Keep Runner Alive
         run: |
-          $localIPs = (Get-NetIPAddress -AddressFamily IPv4 `
-                       | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.AddressState -eq 'Preferred' } `
-                       | Select-Object -ExpandProperty IPAddress) -join ", "
-          if (-not $localIPs) { $localIPs = "No usable IPv4 detected" }
-
-          $lines = @()
-          $lines += "RDP Username: RDP"
-          $lines += "RDP Password: $env:RDP_PASSWORD"
-          $lines += "Expires On : $env:RDP_EXPIRE"
-          $lines += "Local IPv4 : $localIPs"
-          if ($env:LOCLX_ADDR) { $lines += "LocalXpose : $env:LOCLX_ADDR" } else { $lines += "LocalXpose : (not available)" }
-          if ($env:PAGEKITE_SUB) { $lines += "PageKite   : $env:PAGEKITE_SUB.pagekite.me:3389" } else { $lines += "PageKite   : (not started)" }
-
-          $outFile = "RDP_INFO.txt"
-          $lines | Out-File -FilePath $outFile -Encoding UTF8 -Force
-          Write-Host "=== RDP INFO ==="
-          Get-Content $outFile | ForEach-Object { Write-Host $_ }
-          Write-Host "================"
-
-      - name: Upload RDP info artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rdp-info
-          path: RDP_INFO.txt
-
-      - name: Keep Alive
-        run: |
-          Write-Host "RDP session active. Leave workflow running (cancel workflow to stop)."
+          Write-Host "RDP session active. Keep this workflow running while connecting from phone."
           while ($true) { Start-Sleep -Seconds 300 }
