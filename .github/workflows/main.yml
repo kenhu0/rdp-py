@@ -11,16 +11,12 @@ jobs:
     steps:
       - name: Enable RDP and Firewall
         run: |
-          # Enable Remote Desktop (disabling NLA to simplify connections from RDP clients)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                            -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "UserAuthentication" -Value 0 -Force
-
-          # Ensure firewall rule exists for port 3389
           netsh advfirewall firewall delete rule name="GitHub-RDP" 2>$null
           netsh advfirewall firewall add rule name="GitHub-RDP" dir=in action=allow protocol=TCP localport=3389
-
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User (expires in 30 days)
@@ -42,16 +38,18 @@ jobs:
             New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires:$false
           }
 
-          # Add to Remote Desktop Users (do not give admin rights)
+          # Add to Remote Desktop Users (no admin)
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
 
-          # Expire in 30 days
+          # Set expiry in 30 days
           $expireDate = (Get-Date).AddDays(30)
           net user RDP /expires:$($expireDate.ToString("MM/dd/yyyy"))
 
-          # Export values to GITHUB_ENV
-          "`"RDP_PASSWORD=$password`"" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "`"RDP_EXPIRE=$expireDate`""  | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Correctly append to GITHUB_ENV (use Add-Content to avoid UTF-16 output)
+          Add-Content -Path $env:GITHUB_ENV -Value ("RDP_PASSWORD=" + $password)
+          Add-Content -Path $env:GITHUB_ENV -Value ("RDP_EXPIRE=" + $expireDate.ToString("o"))
+
+          Write-Host "RDP user created. (Password exported to GITHUB_ENV)"
 
       # --- Try to download & start LocalXpose (may fail if URL changes) ---
       - name: Download LocalXpose (try latest release)
@@ -62,24 +60,22 @@ jobs:
           try {
             Invoke-WebRequest -Uri $url -OutFile loclx.zip -ErrorAction Stop
             Expand-Archive loclx.zip -DestinationPath loclx_extracted -Force
-            # Try common executable names
             $exe = Get-ChildItem -Path loclx_extracted -Recurse -Filter "loclx*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($exe) {
               Move-Item $exe.FullName .\loclx.exe -Force
               $ok = $true
-            } else {
-              # maybe the zip contains loclx.exe at root
-              if (Test-Path .\loclx.exe) { $ok = $true }
+            } elseif (Test-Path .\loclx.exe) {
+              $ok = $true
             }
           } catch {
             Write-Warning "LocalXpose download failed: $($_.Exception.Message)"
           }
           if ($ok) {
+            Add-Content -Path $env:GITHUB_ENV -Value "LOCLX_AVAILABLE=true"
             Write-Host "LocalXpose downloaded."
-            "`"LOCLX_AVAILABLE=true`"" | Out-File -FilePath $env:GITHUB_ENV -Append
           } else {
-            Write-Host "LocalXpose not available; continuing to PageKite fallback."
-            "`"LOCLX_AVAILABLE=false`"" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Add-Content -Path $env:GITHUB_ENV -Value "LOCLX_AVAILABLE=false"
+            Write-Host "LocalXpose not available; continuing."
           }
 
       - name: Start LocalXpose Tunnel (if available)
@@ -91,7 +87,7 @@ jobs:
           $addrLine = ($output -split "`n" | Select-String -Pattern "tcp://").ToString().Trim()
           if ($addrLine) {
             $addr = $addrLine.Trim()
-            "`"LOCLX_ADDR=$addr`"" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Add-Content -Path $env:GITHUB_ENV -Value ("LOCLX_ADDR=" + $addr)
             Write-Host "LocalXpose tunnel address: $addr"
           } else {
             Write-Warning "LocalXpose started but no address found in log."
@@ -106,8 +102,7 @@ jobs:
         run: |
           $random = Get-Random -Minimum 10000 -Maximum 99999
           $sub = "rdp-$random"
-          "`"PAGEKITE_SUB=$sub`"" | Out-File -FilePath $env:GITHUB_ENV -Append
-          # Start PageKite (runs in background and writes to log)
+          Add-Content -Path $env:GITHUB_ENV -Value ("PAGEKITE_SUB=" + $sub)
           Start-Process -NoNewWindow -FilePath "python" -ArgumentList "pagekite.py 3389 $sub.pagekite.me" -RedirectStandardOutput pagekite.log
           Start-Sleep -Seconds 10
           Write-Host "PageKite started for host: $sub.pagekite.me"
@@ -132,7 +127,6 @@ jobs:
           Write-Host "=== RDP INFO ==="
           Get-Content $outFile | ForEach-Object { Write-Host $_ }
           Write-Host "================"
-          # Upload artifact via step below (artifact uploader step requires file to exist)
 
       - name: Upload RDP info artifact
         uses: actions/upload-artifact@v4
