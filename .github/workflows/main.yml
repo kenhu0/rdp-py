@@ -21,17 +21,25 @@ jobs:
 
       - name: Create RDP User (expires in 30 days)
         run: |
-          Add-Type -AssemblyName System.Web
-          $password = [System.Web.Security.Membership]::GeneratePassword(16,3)
+          # Generate random password (works on PowerShell Core)
+          $upper   = 65..90    | ForEach-Object {[char]$_}
+          $lower   = 97..122   | ForEach-Object {[char]$_}
+          $number  = 48..57    | ForEach-Object {[char]$_}
+          $special = 33..47+58..64+91..96+123..126 | ForEach-Object {[char]$_}
+          $allChars = $upper + $lower + $number + $special
+          $password = -join ((1..16) | ForEach-Object { $allChars | Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
+          # Create user
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires:$false
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
 
+          # Expire in 30 days
           $expireDate = (Get-Date).AddDays(30)
           net user RDP /expires:$($expireDate.ToString("MM/dd/yyyy"))
 
+          # Export env
           echo "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "RDP_EXPIRE=$expireDate" | Out-File -FilePath $env:GITHUB_ENV -Append
 
@@ -79,4 +87,3 @@ jobs:
         run: |
           Write-Host "RDP session active. Leave workflow running."
           while ($true) { Start-Sleep -Seconds 300 }
-
