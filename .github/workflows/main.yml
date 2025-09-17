@@ -35,7 +35,7 @@ jobs:
           echo "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "RDP_EXPIRE=$expireDate" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # --- Primary Tunnel: LocalXpose ---
+      # --- LocalXpose Tunnel ---
       - name: Download LocalXpose
         run: |
           Invoke-WebRequest https://github.com/localxpose/localxpose/releases/download/v0.0.50/loclx-windows-amd64.zip -OutFile loclx.zip
@@ -44,33 +44,32 @@ jobs:
 
       - name: Start LocalXpose Tunnel
         run: |
-          Start-Process -NoNewWindow -FilePath .\loclx\loclx.exe -ArgumentList "tcp --port 3389" -RedirectStandardOutput tunnel.log
+          Start-Process -NoNewWindow -FilePath .\loclx\loclx.exe -ArgumentList "tcp --port 3389" -RedirectStandardOutput loclx.log
           Start-Sleep -Seconds 15
-          $output = Get-Content tunnel.log -Raw
+          $output = Get-Content loclx.log -Raw
           $addr = ($output -split "`n" | Select-String -Pattern "tcp://").ToString().Trim()
-          if ($addr) {
-            echo "TUNNEL_ADDR=$addr" | Out-File -FilePath $env:GITHUB_ENV -Append
-            echo "TUNNEL_TYPE=LocalXpose" | Out-File -FilePath $env:GITHUB_ENV -Append
-          }
+          echo "LOCLX_ADDR=$addr" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # --- Backup Tunnel: PageKite ---
+      # --- PageKite Tunnel ---
       - name: Download PageKite
-        if: env.TUNNEL_ADDR == ''
         run: |
           Invoke-WebRequest https://pagekite.net/pk/pagekite.py -OutFile pagekite.py
-          python pagekite.py 3389 rdp-$(Get-Random -Maximum 99999).pagekite.me
 
+      - name: Start PageKite Tunnel
+        run: |
+          $random = Get-Random -Maximum 99999
+          echo "PAGEKITE_SUB=rdp-$random" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Start-Process -NoNewWindow -FilePath "python" -ArgumentList "pagekite.py 3389 rdp-$random.pagekite.me" -RedirectStandardOutput pagekite.log
+          Start-Sleep -Seconds 15
+
+      # --- Show RDP Credentials ---
       - name: Show RDP Credentials
         run: |
           Write-Host "============================="
           Write-Host "      RDP ACCESS DETAILS     "
           Write-Host "============================="
-          if ($env:TUNNEL_TYPE -eq "LocalXpose") {
-            Write-Host "Tunnel (LocalXpose): $env:TUNNEL_ADDR"
-          } else {
-            Write-Host "Tunnel (PageKite)   : rdp-XXXXX.pagekite.me:3389"
-            Write-Host "⚠ Replace XXXXX with the random ID shown by PageKite in logs"
-          }
+          Write-Host "LocalXpose : $env:LOCLX_ADDR"
+          Write-Host "PageKite   : $env:PAGEKITE_SUB.pagekite.me:3389"
           Write-Host "Username   : RDP"
           Write-Host "Password   : $env:RDP_PASSWORD"
           Write-Host "Expires On : $env:RDP_EXPIRE"
@@ -80,3 +79,4 @@ jobs:
         run: |
           Write-Host "RDP session active. Leave workflow running."
           while ($true) { Start-Sleep -Seconds 300 }
+
